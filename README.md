@@ -4,20 +4,31 @@
 
 - **模式**：本地模拟链 + 模拟钱包（全局明确标注 MOCK），不涉及真实资金，不需要私钥/助记词。
 - **范围**：单条 EVM 测试网络（chainId `31337`）、单一 ERC-20 测试代币 `MOCK`，精度固定 6 位，每批 1–20 人。
-- **栈**：Vue 3 + Vite + TypeScript + Element Plus（前端）；Node.js 22 + Fastify + TypeScript + Node 内置 SQLite（后端）。
+- **栈**：Vue 3 + Vite + TypeScript + Element Plus（前端）；提供**两套接口完全兼容的后端**，可任选其一：
+  - **Node.js 版**：Node.js 22 + Fastify + TypeScript + Node 内置 `node:sqlite`（目录 `server/`）
+  - **Python 版**：Python 3.11+ + FastAPI + 标准库 `sqlite3`（目录 `server-python/`）
+- 两套后端共用同一前端与同一套 REST 接口契约，行为、状态码、错误码与数据结构一致，切换无需改动前端。
 
-> 设计重点：金额全程 `BigInt` 最小单位、服务端独立校验、幂等创建、成功状态只来自链查询、授权/转账分账、防重放与刷新恢复。
+> 设计重点：金额全程用整数最小单位（Node 用 `BigInt`、Python 用原生大整数 `int`）、服务端独立校验、幂等创建、成功状态只来自链查询、授权/转账分账、防重放与刷新恢复。
 
 ---
 
 ## 一、启动说明
 
-环境：**Node.js ≥ 22.5**（需要内置 `node:sqlite`）。依赖用官方源安装。
+前端只启动一次，后端在 Node.js 版与 Python 版之间**二选一**即可（都监听 `3001`，接口一致）。
+
+### 1. 安装前端依赖（两种方案通用）
 
 ```bash
 cd batch-transfer-workbench
 npm install --registry=https://registry.npmjs.org
+```
 
+### 2A. 方案 A：Node.js 后端（默认）
+
+环境：**Node.js ≥ 22.5**（需要内置 `node:sqlite`）。
+
+```bash
 # 开发模式：前端(5173) + 后端(3001) 同时启动
 npm run dev
 # 浏览器打开 http://localhost:5173
@@ -31,7 +42,35 @@ npm start
 npm test
 ```
 
-后端数据库默认写入 `server/data/workbench.db`（创建批次与交易状态持久化，浏览器刷新、后端重启后仍可查询）。可用环境变量 `DB_PATH=:memory:`、PORT 覆盖。
+数据库默认写入 `server/data/workbench.db`。
+
+### 2B. 方案 B：Python 后端（接口等价）
+
+环境：**Python ≥ 3.11**（本项目用 3.13 验证；仅用标准库 `sqlite3`，无需数据库服务）。
+
+```bash
+cd server-python
+pip install -r requirements.txt          # fastapi / uvicorn / pydantic / pytest / httpx
+
+# 启动后端（监听 3001，与前端代理一致）
+python3 -m uvicorn app.main:app --host 0.0.0.0 --port 3001
+# 或： DB_PATH=:memory: python3 -m uvicorn app.main:app --port 3001
+```
+
+前端仍在项目根目录用 `npm run dev:web` 单独启动（前端 5173 会代理 `/api` 到 3001）：
+
+```bash
+cd .. && npm run dev:web
+# 浏览器打开 http://localhost:5173
+```
+
+生产模式下，Python 后端在检测到 `web/dist` 存在时也会单端口托管前端，直接访问 `http://localhost:3001` 即可。
+
+数据库默认写入 `server-python/data/workbench_py.db`（与 Node 版各自独立）。
+
+> 说明：根目录 `npm run dev` 默认拉起 Node 后端。若要用 Python 后端，请按 2B 单独启动 Python 进程，并用 `npm run dev:web` 只启前端；两套后端不要同时监听 3001。
+
+两套后端均支持用环境变量 `DB_PATH=:memory:` 使用内存数据库，Node 版另支持 `PORT` 覆盖端口。
 
 ---
 
@@ -126,11 +165,21 @@ npm test
 
 ---
 
-## 五、自测（`npm test`）
+## 五、自测
 
-Vitest 覆盖：金额精度/非法输入、逐行校验、大小写重复地址、幂等、固定目标、六个场景、账户/网络变化、授权与转账分离。
+两套后端各自提供自动化测试，覆盖相同场景：
 
-手动可复现步骤（前端选择对应场景）：
+```bash
+# Node.js 版（Vitest，19 项）
+npm test
+
+# Python 版（pytest，15 项）
+cd server-python && DB_PATH=:memory: python3 -m pytest -q
+```
+
+覆盖范围：金额精度/非法输入、逐行校验、大小写重复地址、幂等、固定目标、六个场景、账户/网络变化、授权与转账分离、防重放。
+
+手动可复现步骤（前端选择对应场景，对两套后端均适用）：
 
 1. **正常完成**：SUCCESS → 连接 → 录入 → 确认 → 创建 → 检查 → 授权 → 自动查询 → 提交转账 → 自动查询 → 已确认成功。
 2. **无效输入**：录入零地址 / 重复地址（大小写不同）/ `1.1234567` / `1e3`，对应行显示错误且无法创建。
@@ -145,7 +194,7 @@ Vitest 覆盖：金额精度/非法输入、逐行校验、大小写重复地址
 
 ## 六、AI 使用方式简述
 
-AI 用于：根据题目拆解方案与目录结构、生成前后端模块与类型定义、编写模拟链与状态机、补齐自测用例、撰写本文档。所有代码经人工审阅与本地自测验证；未使用任何真实资金或真实链上交易。
+AI 用于：根据题目拆解方案与目录结构、生成前后端模块与类型定义、编写模拟链与状态机、补齐自测用例、实现与 Node 版接口等价的 Python 后端、撰写本文档。所有代码经人工审阅与本地自测验证；未使用任何真实资金或真实链上交易。
 
 ## 七、实际耗时
 
@@ -153,8 +202,39 @@ AI 用于：根据题目拆解方案与目录结构、生成前后端模块与�
 
 ## 八、已知限制
 
-- 仅模拟链，未接入真实 EVM 网络与真实钱包（题目允许，真实链能力记为未验证）。`ChainAdapter` 接口已预留，可替换为 ethers.js/viem 实现。
+- 仅模拟链，未接入真实 EVM 网络与真实钱包（题目允许，真实链能力记为未验证）。Node 版 `ChainAdapter` 接口、Python 版 `MockChain` 类均已预留替换点，可接入 ethers.js/viem（Node）或 web3.py（Python）。
 - EVM 地址仅做格式与零地址校验，未做 EIP-55 checksum 校验。
-- 模拟余额为单一账户的全局余额，未实现真实 ERC-20 记账与并发nonce；"`查询超时`"为按查询次数模拟，非真实节点超时。
+- 模拟余额为单一账户的全局余额，未实现真实 ERC-20 记账与并发 nonce；"`查询超时`"为按查询次数模拟，非真实节点超时。
 - 单用户本地应用，无登录/多租户权限；无文件导入导出。
 - 模拟链状态（余额/授权）在后端进程内存中，重启后重置；批次与交易记录持久化在 SQLite。如需余额也持久化可扩展存储。
+- 两套后端的数据库文件相互独立（Node `server/data/workbench.db`、Python `server-python/data/workbench_py.db`），切换后端不会共享已有批次数据；同一时刻只需运行其中一个。
+
+---
+
+## 九、目录结构
+
+```
+batch-transfer-workbench/
+├── web/                    # 前端：Vue 3 + Vite + Element Plus（两套后端共用）
+│   └── src/
+├── server/                 # 后端 A：Node.js + Fastify + TypeScript
+│   ├── src/
+│   │   ├── index.ts        # HTTP 路由
+│   │   ├── service.ts      # 幂等/状态机/防重放/授权转账
+│   │   ├── validation.ts   # 服务端校验
+│   │   ├── money.ts        # BigInt 精确金额
+│   │   ├── db.ts           # node:sqlite 持久化
+│   │   └── chain/          # 链适配接口 + 模拟链
+│   └── test/               # Vitest 测试
+└── server-python/          # 后端 B：Python + FastAPI（接口与 A 完全一致）
+    ├── requirements.txt
+    ├── app/
+    │   ├── main.py         # FastAPI 路由
+    │   ├── service.py      # 幂等/状态机/防重放/授权转账
+    │   ├── validation.py   # 服务端校验
+    │   ├── money.py        # 原生 int 精确金额
+    │   ├── db.py           # sqlite3 持久化
+    │   ├── errors.py       # 统一错误
+    │   └── chain/mock.py   # 模拟链
+    └── tests/              # pytest 测试
+```
